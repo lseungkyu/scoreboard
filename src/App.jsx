@@ -5,16 +5,14 @@ import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken }
 import { Plus, Shield, ArrowUp, Save, RefreshCw, Trash2, Database, RotateCcw, TrendingUp, TrendingDown, CheckSquare, Square, Trophy, List, FastForward } from 'lucide-react';
 
 // --- 1. Firebase 설정 ---
-const firebaseConfig = typeof __firebase_config !== 'undefined' 
-  ? JSON.parse(__firebase_config) 
-  : {
-      apiKey: "AIzaSyCxCOVwf1cY7dx1B9Bk0pTIsxww_Bc8qTQ",
-      authDomain: "biblequizcloud.firebaseapp.com",
-      projectId: "biblequizcloud",
-      storageBucket: "biblequizcloud.firebasestorage.app",
-      messagingSenderId: "794279182240",
-      appId: "1:794279182240:web:63f70343a050513d902ec5"
-    };
+const firebaseConfig = {
+  apiKey: "AIzaSyCxCOVwf1cY7dx1B9Bk0pTIsxww_Bc8qTQ",
+  authDomain: "biblequizcloud.firebaseapp.com",
+  projectId: "biblequizcloud",
+  storageBucket: "biblequizcloud.firebasestorage.app",
+  messagingSenderId: "794279182240",
+  appId: "1:794279182240:web:63f70343a050513d902ec5"
+};
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
