@@ -1,10 +1,10 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, doc, setDoc, onSnapshot, collection, query } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, onSnapshot, collection } from 'firebase/firestore';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
-import { Plus, Shield, ArrowUp, Save, RefreshCw, Trash2, Database, RotateCcw, TrendingUp, TrendingDown, CheckSquare, Square, Trophy, List, FastForward } from 'lucide-react';
+import { Plus, Shield, ArrowUp, Save, RefreshCw, RotateCcw, Database, Trophy, List, TrendingUp, TrendingDown, CheckSquare, Square, Trash2 } from 'lucide-react';
 
-// --- 1. Firebase 설정 ---
+// --- Firebase 설정 ---
 const firebaseConfig = {
   apiKey: "AIzaSyCxCOVwf1cY7dx1B9Bk0pTIsxww_Bc8qTQ",
   authDomain: "biblequizcloud.firebaseapp.com",
@@ -32,7 +32,7 @@ const CARD_TYPES = [
   { id: 'plus_3', name: '추가점수(3점)', type: 'plus', value: 3 },
   { id: 'overtake_2', name: '2등 추월', type: 'overtake', value: 2 },
   { id: 'overtake_3', name: '3등 추월', type: 'overtake', value: 3 },
-  { id: 'defense', name: '방어권', type: 'defense', value: 0 },
+  { id: 'defense', name: '방어권', type: 'defense', value: 1 },
 ];
 
 const App = () => {
@@ -40,8 +40,10 @@ const App = () => {
   const [rounds, setRounds] = useState([]);
   const [currentRoundPoints, setCurrentRoundPoints] = useState(1);
   const [selectedTeams, setSelectedTeams] = useState([]);
-  const [viewMode, setViewMode] = useState('total'); // 'total' (아이템 반영), 'base' (미반영)
-  
+  const [viewMode, setViewMode] = useState('total');
+  const [statusMsg, setStatusMsg] = useState("");
+  const [isSyncing, setIsSyncing] = useState(false);
+
   const [fixedItemCards, setFixedItemCards] = useState(
     Array.from({ length: TEAM_COUNT }, (_, i) => ({
       teamId: i + 1,
@@ -51,9 +53,6 @@ const App = () => {
     }))
   );
 
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [statusMsg, setStatusMsg] = useState("");
-
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -62,172 +61,153 @@ const App = () => {
         } else {
           await signInAnonymously(auth);
         }
-      } catch (error) {
-        console.error("인증 실패:", error);
-      }
+      } catch (e) { console.error(e); }
     };
     initAuth();
-    const unsubscribeAuth = onAuthStateChanged(auth, setUser);
-    return () => unsubscribeAuth();
+    return onAuthStateChanged(auth, setUser);
   }, []);
 
   useEffect(() => {
     if (!user) return;
     const q = collection(db, 'artifacts', appId, 'public', 'data', COLLECTION_NAME);
-    const unsubscribeData = onSnapshot(q, (snapshot) => {
+    return onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map(doc => doc.data());
       const gameDoc = data.find(d => d.id === 'current_game');
-      if (gameDoc && gameDoc.rounds) {
-        setRounds(gameDoc.rounds);
-      }
-    }, (error) => {
-      console.error("데이터 수신 에러:", error);
+      if (gameDoc?.rounds) setRounds(gameDoc.rounds);
     });
-    return () => unsubscribeData();
   }, [user]);
-
-  const saveToCloud = async (updatedRounds) => {
-    if (!user) return;
-    setIsSyncing(true);
-    setStatusMsg("Cloud 동기화 중...");
-
-    try {
-      const docRef = doc(db, 'artifacts', appId, 'public', 'data', COLLECTION_NAME, 'current_game');
-      const currentStats = calculateAllStats(updatedRounds);
-      
-      await setDoc(docRef, {
-        id: 'current_game',
-        rounds: updatedRounds,
-        stats: currentStats,
-        updatedAt: new Date().toISOString(),
-        updatedBy: user.uid
-      });
-      setStatusMsg("동기화 완료!");
-    } catch (error) {
-      console.error("저장 실패:", error);
-      setStatusMsg("저장 실패!");
-    } finally {
-      setIsSyncing(false);
-      setTimeout(() => setStatusMsg(""), 2000);
-    }
-  };
 
   const calculateAllStats = (targetRounds) => {
     let teamScores = Array.from({ length: TEAM_COUNT }, (_, i) => ({
-      id: i + 1, 
+      id: i + 1,
       baseScore: 0,
       totalScore: 0,
       itemDiff: 0,
-      hasDefense: false
+      defenseStack: 0
     }));
 
     targetRounds.forEach((round) => {
-      // 1. 기본 정답 점수 적용
-      teamScores.forEach(team => {
-        if (round.winners.includes(team.id)) {
-          team.baseScore += round.points;
-          team.totalScore += round.points;
+      teamScores.forEach(t => {
+        if (round.winners.includes(t.id)) {
+          t.baseScore += round.points;
+          t.totalScore += round.points;
         }
       });
 
-      // 2. 해당 라운드 방어권 팀 식별
-      const defenders = round.cards.filter(c => c.cardType === 'defense').map(c => c.teamId);
+      round.cards.filter(c => c.cardType === 'defense').forEach(card => {
+        const team = teamScores.find(t => t.id === card.teamId);
+        if (team) team.defenseStack += card.value;
+      });
 
-      // 3. 공격 및 추가 점수 카드 적용 (추월 제외)
       round.cards.forEach(card => {
-        if (card.cardType === 'none' || card.cardType === 'defense' || card.cardType === 'overtake') return;
-        
         const team = teamScores.find(t => t.id === card.teamId);
         if (card.cardType === 'plus') {
           team.totalScore += card.value;
           team.itemDiff += card.value;
         } else if (card.cardType === 'attack') {
           const target = teamScores.find(t => t.id === parseInt(card.targetId));
-          // 타겟이 방어권을 쓰고 있지 않을 때만 공격 성공
-          if (target && !defenders.includes(target.id)) {
-            const stealAmount = Math.min(card.value, target.totalScore);
-            target.totalScore -= stealAmount;
-            target.itemDiff -= stealAmount;
-            team.totalScore += stealAmount;
-            team.itemDiff += stealAmount;
+          if (target) {
+            if (target.defenseStack > 0) {
+              target.defenseStack -= 1;
+            } else {
+              const steal = Math.min(card.value, target.totalScore);
+              target.totalScore -= steal;
+              target.itemDiff -= steal;
+              team.totalScore += steal;
+              team.itemDiff += steal;
+            }
           }
         }
       });
 
-      // 4. 추월 카드 적용 (라운드 마지막에 처리)
+      // 4. 추월 로직 최종 수정: 전체 구간 방어권 전수 조사
       round.cards.filter(c => c.cardType === 'overtake').forEach(card => {
         const team = teamScores.find(t => t.id === card.teamId);
-        const steps = card.value; // 2등 추월 또는 3등 추월
+        const steps = card.value; // 2(2등 추월) 또는 3(3등 추월)
 
-        // 현재 점수 기준으로 팀들 정렬 (동점은 ID순)
+        // 현재 점수 기준 내림차순 정렬 (동점 시 ID순으로 고유 인덱스 부여)
         const sorted = [...teamScores].sort((a, b) => b.totalScore - a.totalScore || a.id - b.id);
-        const myIndex = sorted.findIndex(t => t.id === team.id);
-        
-        // 내 위에 팀이 있어야 추월 가능
-        if (myIndex >= steps - 1) {
-          const targetTeamInRank = sorted[myIndex - (steps - 1)]; // 2등 추월이면 바로 위(1단계 위) 팀
-          
-          // 방어권 확인: 나를 넘어서 추월할 수 없음
-          // 즉, 내 위로 'steps-1'개 팀 중 방어권을 가진 팀이 있다면 그 팀까지만 추월 가능
-          let finalTargetTeam = targetTeamInRank;
-          for (let i = 1; i < steps; i++) {
-            const stepTeam = sorted[myIndex - i];
-            if (defenders.includes(stepTeam.id)) {
-              finalTargetTeam = stepTeam;
-              break; 
+        const myRankIndex = sorted.findIndex(t => t.id === team.id);
+
+        // 목표 인덱스 설정 (나보다 steps-1 만큼 앞선 팀의 점수 참조)
+        const targetIndex = myRankIndex - (steps - 1);
+
+        if (targetIndex >= 0) {
+          const targetTeamRef = sorted[targetIndex];
+          const targetScoreValue = targetTeamRef.totalScore;
+
+          // [해결 포인트] 경로 체크 범위를 '0번 인덱스(1등)'부터 '내 바로 위 인덱스'까지가 아니라,
+          // '목표 지점(targetIndex)'부터 '내 바로 위(myRankIndex - 1)'까지 "모든 팀"을 검사합니다.
+          let isBlocked = false;
+
+          // 내 위로 존재하는 모든 팀 중 하나라도 방어권이 있는지 확인
+          for (let i = 0; i < myRankIndex; i++) {
+            // 특히 '목표 점수'와 같거나 높은 점수를 가진 팀들이 방어권을 썼는지 확인
+            if (sorted[i].defenseStack > 0) {
+              // 추월 경로 상에 있거나 목표 순위권에 있는 팀이 막아섬
+              sorted[i].defenseStack -= 1; // 방어권 1개 소모
+              isBlocked = true;
+              break;
             }
           }
 
-          if (finalTargetTeam && finalTargetTeam.id !== team.id) {
+          if (!isBlocked) {
+            // 방어막이 전혀 없을 때만 점수 상승 (+1점)
             const oldScore = team.totalScore;
-            team.totalScore = finalTargetTeam.totalScore;
+            team.totalScore = targetScoreValue + 1;
             team.itemDiff += (team.totalScore - oldScore);
           }
+          // isBlocked가 true면 점수 변동 없이 카드가 소모됩니다.
         }
       });
-      
-      teamScores.forEach(team => { team.hasDefense = defenders.includes(team.id); });
+
+      teamScores.forEach(t => t.defenseStack = 0);
     });
+
+    const sortedFinal = [...teamScores].sort((a, b) => b.totalScore - a.totalScore);
+    let currentRank = 1;
+    sortedFinal.forEach((team, idx) => {
+      if (idx > 0 && team.totalScore < sortedFinal[idx - 1].totalScore) {
+        currentRank = idx + 1;
+      }
+      team.displayRank = currentRank;
+    });
+
     return teamScores;
   };
 
+  const saveToCloud = async (updatedRounds) => {
+    if (!user) return;
+    setIsSyncing(true);
+    setStatusMsg("저장 중...");
+    try {
+      const docRef = doc(db, 'artifacts', appId, 'public', 'data', COLLECTION_NAME, 'current_game');
+      await setDoc(docRef, {
+        id: 'current_game',
+        rounds: updatedRounds,
+        updatedAt: new Date().toISOString()
+      });
+      setStatusMsg("완료");
+    } catch (e) { setStatusMsg("에러"); }
+    finally { setIsSyncing(false); setTimeout(() => setStatusMsg(""), 2000); }
+  };
+
   const addRound = () => {
-    if (selectedTeams.length === 0 && fixedItemCards.every(c => c.cardType === 'none')) return;
-    
     const activeCards = fixedItemCards.filter(c => c.cardType !== 'none');
-    
-    const newRound = {
-      id: Date.now(),
-      points: currentRoundPoints,
-      winners: [...selectedTeams],
-      cards: activeCards,
-    };
-
-    const updatedRounds = [...rounds, newRound];
-    setRounds(updatedRounds);
-    saveToCloud(updatedRounds);
-
+    const newRound = { id: Date.now(), points: currentRoundPoints, winners: [...selectedTeams], cards: activeCards };
+    const updated = [...rounds, newRound];
+    setRounds(updated);
+    saveToCloud(updated);
     setSelectedTeams([]);
-    setFixedItemCards(Array.from({ length: TEAM_COUNT }, (_, i) => ({
-      teamId: i + 1,
-      cardType: 'none',
-      value: 0,
-      targetId: i === 0 ? '2' : '1'
-    })));
+    setFixedItemCards(prev => prev.map(c => ({ ...c, cardType: 'none', value: 0 })));
   };
 
+  // --- 추가된 초기화 함수 ---
   const resetGame = async () => {
-    if (!window.confirm("모든 데이터를 초기화하시겠습니까?")) return;
-    setRounds([]);
-    await saveToCloud([]);
-  };
-
-  const selectAllTeams = () => {
-    setSelectedTeams(Array.from({ length: TEAM_COUNT }, (_, i) => i + 1));
-  };
-
-  const deselectAllTeams = () => {
-    setSelectedTeams([]);
+    if (window.confirm("모든 라운드 데이터와 점수를 초기화하시겠습니까?")) {
+      setRounds([]);
+      await saveToCloud([]);
+    }
   };
 
   const gameStats = useMemo(() => {
@@ -239,187 +219,114 @@ const App = () => {
     });
   }, [rounds, viewMode]);
 
-  const updateFixedCard = (index, field, value) => {
+  const updateFixedCard = (index, field, val) => {
     const newCards = [...fixedItemCards];
     if (field === 'cardType') {
-      const typeInfo = CARD_TYPES.find(t => t.id === value || t.type === value);
-      newCards[index].cardType = typeInfo.type;
-      newCards[index].value = typeInfo ? typeInfo.value : 0;
+      const info = CARD_TYPES.find(t => t.id === val);
+      newCards[index].cardType = info.type;
+      newCards[index].value = info.value;
     } else {
-      newCards[index][field] = value;
+      newCards[index][field] = parseInt(val) || 0;
     }
     setFixedItemCards(newCards);
   };
 
   return (
-    <div className="flex h-screen bg-slate-50 text-slate-900 overflow-hidden font-sans">
-      {/* 입력 패널 */}
+    <div className="flex h-screen bg-slate-50 overflow-hidden font-sans">
       <div className="w-1/2 p-6 overflow-y-auto border-r border-slate-200">
         <header className="mb-6 flex justify-between items-center">
+          <h1 className="text-2xl font-black text-blue-600 flex items-center gap-2"><Database /> 관리자</h1>
+          <div className="flex items-center gap-3">
+            {/* 초기화 버튼 추가 */}
+            <button
+              onClick={resetGame}
+              className="flex items-center gap-1 px-3 py-1.5 bg-red-50 text-red-600 rounded-xl text-xs font-bold border border-red-100 hover:bg-red-100 transition-colors"
+            >
+              <RotateCcw size={14} /> 점수 초기화
+            </button>
+            {statusMsg && <div className="bg-blue-600 text-white text-[10px] px-3 py-1 rounded-full">{statusMsg}</div>}
+          </div>
+        </header>
+
+        <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 space-y-8">
           <div>
-            <h1 className="text-2xl font-black text-blue-600 flex items-center gap-2">
-              <Database size={24} /> 스코어 관리자
-            </h1>
-            <p className="text-xs text-slate-500 mt-1 font-medium">실시간 클라우드 동기화 모드</p>
-          </div>
-          {statusMsg && (
-            <div className="bg-blue-600 text-white text-[10px] px-3 py-1 rounded-full animate-pulse font-bold">
-              {statusMsg}
-            </div>
-          )}
-        </header>
-
-        <section className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 mb-6">
-          <div className="flex justify-between items-center mb-6">
-            <h2 className="text-lg font-bold flex items-center gap-2 text-slate-700">라운드 데이터 입력</h2>
-            <button onClick={resetGame} className="text-xs font-bold text-red-500 hover:bg-red-50 px-3 py-1.5 rounded-xl transition-all border border-red-100 flex items-center gap-1">
-              <RotateCcw size={14} /> 초기화
-            </button>
-          </div>
-
-          <div className="space-y-8">
-            {/* 1. 배점 */}
-            <div>
-              <label className="text-xs font-bold text-slate-400 uppercase tracking-widest block mb-3">1. 라운드 배점</label>
-              <div className="flex gap-2">
-                {[1, 2, 3].map(p => (
-                  <button key={p} onClick={() => setCurrentRoundPoints(p)} className={`flex-1 py-3 rounded-2xl font-black transition-all ${currentRoundPoints === p ? 'bg-blue-600 text-white shadow-lg shadow-blue-200' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}>
-                    {p}점
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* 2. 정답 조 */}
-            <div>
-              <div className="flex justify-between items-center mb-3">
-                <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">2. 정답 조 선택</label>
-                <div className="flex gap-2">
-                  <button onClick={selectAllTeams} className="text-[10px] font-bold text-blue-600 flex items-center gap-1 bg-blue-50 px-2 py-1 rounded-lg">
-                    <CheckSquare size={12} /> 전체 선택
-                  </button>
-                  <button onClick={deselectAllTeams} className="text-[10px] font-bold text-slate-500 flex items-center gap-1 bg-slate-100 px-2 py-1 rounded-lg">
-                    <Square size={12} /> 전체 해제
-                  </button>
-                </div>
-              </div>
-              <div className="grid grid-cols-4 gap-2">
-                {Array.from({ length: TEAM_COUNT }, (_, i) => i + 1).map(num => (
-                  <button key={num} onClick={() => setSelectedTeams(prev => prev.includes(num) ? prev.filter(t => t !== num) : [...prev, num])} className={`py-2 rounded-xl text-sm font-bold transition-all border-2 ${selectedTeams.includes(num) ? 'bg-emerald-500 border-emerald-500 text-white shadow-md shadow-emerald-100' : 'bg-white border-slate-100 text-slate-600 hover:border-slate-300'}`}>
-                    {num}조
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* 3. 아이템 카드 (2열 그리드로 수정) */}
-            <div>
-              <label className="text-xs font-bold text-slate-400 uppercase tracking-widest block mb-3">3. 팀별 아이템 사용</label>
-              <div className="grid grid-cols-2 gap-2">
-                {fixedItemCards.map((card, idx) => (
-                  <div key={idx} className={`flex flex-col gap-2 p-3 rounded-2xl border transition-all ${card.cardType !== 'none' ? 'bg-blue-50 border-blue-200 shadow-sm' : 'bg-slate-50 border-slate-100'}`}>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-black text-slate-500">{card.teamId}조</span>
-                      {card.cardType === 'attack' && (
-                        <div className="flex items-center gap-1 animate-in fade-in slide-in-from-right-1">
-                          <span className="text-[9px] font-bold text-slate-400">대상:</span>
-                          <select 
-                            className="bg-white border border-slate-200 rounded-lg px-1.5 py-0.5 text-[10px] font-bold outline-none"
-                            value={card.targetId}
-                            onChange={(e) => updateFixedCard(idx, 'targetId', e.target.value)}
-                          >
-                            {Array.from({ length: TEAM_COUNT }, (_, i) => i + 1)
-                              .filter(n => n !== card.teamId)
-                              .map(n => <option key={n} value={n}>{n}조</option>)}
-                          </select>
-                        </div>
-                      )}
-                    </div>
-                    <select 
-                      className="w-full bg-white border border-slate-200 rounded-xl px-2 py-1.5 text-[11px] font-bold outline-none shadow-sm cursor-pointer"
-                      value={CARD_TYPES.find(t => t.type === card.cardType && t.value === card.value)?.id || 'none'}
-                      onChange={(e) => updateFixedCard(idx, 'cardType', e.target.value)}
-                    >
-                      {CARD_TYPES.map(type => <option key={type.id} value={type.id}>{type.name}</option>)}
-                    </select>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <button onClick={addRound} disabled={isSyncing || !user} className="w-full py-5 bg-slate-900 text-white rounded-3xl font-black text-xl flex items-center justify-center gap-3 hover:bg-slate-800 disabled:bg-slate-300 transition-all shadow-xl shadow-slate-200 sticky bottom-0">
-              {isSyncing ? <RefreshCw className="animate-spin" /> : <Save />} 라운드 결과 업데이트
-            </button>
-          </div>
-        </section>
-      </div>
-
-      {/* 실시간 랭킹 패널 */}
-      <div className="w-1/2 p-6 bg-white overflow-y-auto">
-        <header className="mb-8">
-          <div className="flex justify-between items-start mb-6">
-            <div>
-              <h2 className="text-3xl font-black text-slate-800 flex items-center gap-3 tracking-tight">
-                <ArrowUp size={32} className="text-emerald-500" /> 리더보드
-              </h2>
-              <p className="text-slate-400 text-sm mt-1">항목별 가중치가 반영된 실시간 순위</p>
-            </div>
-            <div className="bg-slate-100 p-1.5 rounded-2xl flex gap-1 shadow-inner">
-              <button 
-                onClick={() => setViewMode('total')}
-                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all ${viewMode === 'total' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
-              >
-                <Trophy size={14} /> 최종 스코어
-              </button>
-              <button 
-                onClick={() => setViewMode('base')}
-                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all ${viewMode === 'base' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
-              >
-                <List size={14} /> 기본 스코어
-              </button>
+            <label className="text-xs font-bold text-slate-400 mb-3 block">배점 설정</label>
+            <div className="flex gap-2">
+              {[1, 2, 3].map(p => (
+                <button key={p} onClick={() => setCurrentRoundPoints(p)} className={`flex-1 py-3 rounded-2xl font-black ${currentRoundPoints === p ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-400'}`}>{p}점</button>
+              ))}
             </div>
           </div>
-        </header>
 
-        <div className="space-y-4">
-          {gameStats.map((team, index) => {
-            const currentScore = viewMode === 'total' ? team.totalScore : team.baseScore;
-            return (
-              <div key={team.id} className={`flex items-center p-5 rounded-3xl border-2 transition-all ${index < 3 ? 'border-slate-900 bg-slate-900 text-white shadow-2xl scale-[1.02] z-10' : 'border-slate-100 bg-slate-50/50'}`}>
-                <div className={`w-12 h-12 flex items-center justify-center rounded-2xl font-black text-2xl mr-5 ${index === 0 ? 'bg-yellow-400 text-white shadow-lg shadow-yellow-200' : index === 1 ? 'bg-slate-300 text-slate-600' : index === 2 ? 'bg-orange-400 text-white' : 'bg-white text-slate-400 border border-slate-100'}`}>
-                  {index + 1}
-                </div>
-                
-                <div className="flex-1">
-                  <div className="text-xl font-black flex items-center gap-2">
-                    {team.id}조
-                    {team.hasDefense && <Shield size={16} className="text-blue-400 fill-blue-400/20" />}
-                  </div>
-                  <div className="flex items-center gap-2 mt-1">
-                    {viewMode === 'total' ? (
-                      <>
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${index < 3 ? 'bg-white/10 text-white/60' : 'bg-slate-200 text-slate-500'}`}>
-                          정답 점수: {team.baseScore}점
-                        </span>
-                        {team.itemDiff !== 0 && (
-                          <span className={`text-[10px] font-bold flex items-center gap-0.5 ${team.itemDiff > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {team.itemDiff > 0 ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
-                            {Math.abs(team.itemDiff)}
-                          </span>
-                        )}
-                      </>
-                    ) : (
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${index < 3 ? 'bg-white/10 text-white/60' : 'bg-slate-200 text-slate-500'}`}>
-                        아이템 미적용 점수
-                      </span>
+          <div>
+            <label className="text-xs font-bold text-slate-400 mb-3 block">정답 조</label>
+            <div className="grid grid-cols-4 gap-2">
+              {Array.from({ length: TEAM_COUNT }, (_, i) => i + 1).map(num => (
+                <button key={num} onClick={() => setSelectedTeams(prev => prev.includes(num) ? prev.filter(t => t !== num) : [...prev, num])} className={`py-2 rounded-xl text-sm font-bold border-2 ${selectedTeams.includes(num) ? 'bg-emerald-500 border-emerald-500 text-white' : 'bg-white text-slate-600'}`}>{num}조</button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="text-xs font-bold text-slate-400 mb-3 block">아이템 카드 (방어권 수량 입력 가능)</label>
+            <div className="grid grid-cols-2 gap-2">
+              {fixedItemCards.map((card, idx) => (
+                <div key={idx} className={`p-3 rounded-2xl border ${card.cardType !== 'none' ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-100'}`}>
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-xs font-black">{card.teamId}조</span>
+                    {card.cardType === 'attack' && (
+                      <select className="text-[10px] border rounded p-0.5" value={card.targetId} onChange={(e) => updateFixedCard(idx, 'targetId', e.target.value)}>
+                        {Array.from({ length: TEAM_COUNT }, (_, i) => i + 1).filter(n => n !== card.teamId).map(n => <option key={n} value={n}>{n}조</option>)}
+                      </select>
+                    )}
+                    {card.cardType === 'defense' && (
+                      <div className="flex items-center gap-1">
+                        <span className="text-[9px] font-bold">수량:</span>
+                        <input type="number" min="1" className="w-8 text-[10px] border rounded px-1" value={card.value} onChange={(e) => updateFixedCard(idx, 'value', e.target.value)} />
+                      </div>
                     )}
                   </div>
+                  <select className="w-full text-[11px] font-bold p-1.5 rounded-xl border" value={CARD_TYPES.find(t => t.type === card.cardType && (t.type !== 'defense' ? t.value === card.value : true))?.id || 'none'} onChange={(e) => updateFixedCard(idx, 'cardType', e.target.value)}>
+                    {CARD_TYPES.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
                 </div>
+              ))}
+            </div>
+          </div>
 
+          <button onClick={addRound} className="w-full py-5 bg-slate-900 text-white rounded-3xl font-black text-xl flex items-center justify-center gap-3">
+            {isSyncing ? <RefreshCw className="animate-spin" /> : <Save />} 라운드 업데이트
+          </button>
+        </div>
+      </div>
+
+      <div className="w-1/2 p-6 bg-white overflow-y-auto">
+        <header className="mb-8 flex justify-between items-end">
+          <div>
+            <h2 className="text-3xl font-black flex items-center gap-3"><ArrowUp className="text-emerald-500" /> 리더보드</h2>
+            <p className="text-slate-400 text-sm">동점 시 같은 등수로 표시됩니다.</p>
+          </div>
+          <div className="flex bg-slate-100 p-1 rounded-xl">
+            <button onClick={() => setViewMode('total')} className={`px-4 py-2 rounded-lg text-xs font-bold ${viewMode === 'total' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-400'}`}>최종</button>
+            <button onClick={() => setViewMode('base')} className={`px-4 py-2 rounded-lg text-xs font-bold ${viewMode === 'base' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-400'}`}>기본</button>
+          </div>
+        </header>
+
+        <div className="space-y-3">
+          {gameStats.map((team, index) => {
+            const currentScore = viewMode === 'total' ? team.totalScore : team.baseScore;
+            const isTop3 = team.displayRank <= 3;
+            return (
+              <div key={team.id} className={`flex items-center p-4 rounded-2xl border-2 transition-all ${isTop3 ? 'border-slate-800 bg-slate-800 text-white shadow-lg' : 'border-slate-100 bg-slate-50'}`}>
+                <div className={`w-10 h-10 flex items-center justify-center rounded-xl font-black text-lg mr-4 ${team.displayRank === 1 ? 'bg-yellow-400' : team.displayRank === 2 ? 'bg-slate-300 text-slate-800' : team.displayRank === 3 ? 'bg-orange-400' : 'bg-white text-slate-400'}`}>
+                  {team.displayRank}
+                </div>
+                <div className="flex-1">
+                  <div className="text-lg font-black">{team.id}조</div>
+                  <div className="text-[10px] opacity-60">정답: {team.baseScore} / 아이템: {team.itemDiff > 0 ? `+${team.itemDiff}` : team.itemDiff}</div>
+                </div>
                 <div className="text-right">
-                  <div className={`text-4xl font-black tabular-nums tracking-tighter ${index < 3 ? 'text-yellow-400' : 'text-blue-600'}`}>
-                    {currentScore}<span className="text-sm font-bold ml-1 opacity-50">PTS</span>
-                  </div>
+                  <div className={`text-3xl font-black ${isTop3 ? 'text-yellow-400' : 'text-blue-600'}`}>{currentScore}<span className="text-xs ml-1 opacity-50">PTS</span></div>
                 </div>
               </div>
             );
