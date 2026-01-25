@@ -6,12 +6,12 @@ import { Plus, Shield, ArrowUp, Save, RefreshCw, RotateCcw, Database, Trophy, Li
 
 // --- Firebase 설정 ---
 const firebaseConfig = {
-  apiKey: "AIzaSyCxCOVwf1cY7dx1B9Bk0pTIsxww_Bc8qTQ",
-  authDomain: "biblequizcloud.firebaseapp.com",
-  projectId: "biblequizcloud",
-  storageBucket: "biblequizcloud.firebasestorage.app",
-  messagingSenderId: "794279182240",
-  appId: "1:794279182240:web:63f70343a050513d902ec5"
+  apiKey: "",
+  authDomain: "",
+  projectId: "",
+  storageBucket: "",
+  messagingSenderId: "",
+  appId: ""
 };
 
 const app = initializeApp(firebaseConfig);
